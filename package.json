@@ -1,25 +1,17 @@
 {
-  "name": "brokex-quant-analyzer",
+  "name": "brokex-data",
   "version": "0.1.0",
-  "description": "Brokex OHLC quant analyzer with technical indicators and HTTP endpoints",
-  "main": "index.js",
   "private": true,
+  "description": "Brokex technical-signal service (scores & refresh API)",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon --watch index.js --watch data --ext js,json index.js",
-    "start:pm2": "pm2 start index.js --name brokex-analyzer",
-    "restart:pm2": "pm2 restart brokex-analyzer || pm2 start index.js --name brokex-analyzer",
-    "logs:pm2": "pm2 logs brokex-analyzer"
+    "pm2": "pm2 start index.js --name brokex-data",
+    "pm2:reload": "pm2 reload brokex-data || pm2 start index.js --name brokex-data"
   },
+  "engines": { "node": ">=18.17" },
   "dependencies": {
     "express": "^4.19.2",
-    "ws": "^8.17.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.0"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "license": "MIT"
+    "ws": "^8.18.0"
+  }
 }
