@@ -23,9 +23,9 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ===== WSS PRICE FEED =====
 const WSS_URL = "wss://wss.brokex.trade:8443";
-// stocke { [assetId:number]: { price:number, ts:number, pair?:string } }
+// stock live { [assetId:number]: { price:number, ts:number, pair?:string } }
 const livePrices = Object.create(null);
-// cache d'analyses en mémoire: { [assetId]: record }
+// cache mémoire (structure interne complète)
 const analysisCache = Object.create(null);
 
 let reconnectAttempts = 0;
@@ -33,12 +33,10 @@ let loggedSampleOnce = false;
 
 function startWss() {
   const ws = new WebSocket(WSS_URL);
-
   ws.on("open", () => {
     reconnectAttempts = 0;
     console.log("[WSS] connected");
   });
-
   ws.on("message", (raw) => {
     try {
       const data = JSON.parse(raw.toString());
@@ -50,15 +48,12 @@ function startWss() {
       Object.entries(data).forEach(([pairKey, payload]) => {
         const item = payload?.instruments?.[0] ?? payload?.data?.instruments?.[0];
         if (!item) return;
-
         const id = Object.prototype.hasOwnProperty.call(payload, "id")
           ? Number(payload.id)
           : (Number(item?.id) || undefined);
-
         const price = parseFloat(item.currentPrice);
         const ts = Number(item.timestamp ?? Date.now());
         const pairName = item.tradingPair?.toUpperCase?.() ?? String(pairKey);
-
         if (Number.isFinite(id) && Number.isFinite(price)) {
           livePrices[id] = { price, ts, pair: pairName };
         }
@@ -67,7 +62,6 @@ function startWss() {
       console.error("[WSS] parse error:", e.message);
     }
   });
-
   ws.on("close", (code) => {
     console.warn("[WSS] closed:", code);
     const delay = Math.min(30000, 1000 * 2 ** Math.min(reconnectAttempts, 5));
@@ -75,7 +69,6 @@ function startWss() {
     console.warn(`[WSS] retrying in ${delay}ms`);
     setTimeout(startWss, delay);
   });
-
   ws.on("error", (err) => {
     console.error("[WSS] error:", err.message);
     try { ws.close(); } catch (_) {}
@@ -86,7 +79,7 @@ startWss();
 // ====== HELPERS (math & utils) ======
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 const toNum = (x) => (typeof x === "number" ? x : parseFloat(x));
-const last = (arr) => (arr?.length ? arr[arr.length - 1] : null);
+const last = (arr) => arr?.length ? arr[arr.length - 1] : null;
 
 function SMA(arr, p) {
   if (arr.length < p) return null;
@@ -231,7 +224,6 @@ function ATR(highs, lows, closes, p = 14) {
     const c = Math.abs(lows[i] - closes[i - 1]);
     tr.push(Math.max(a, b, c));
   }
-  // Wilder smoothing
   let atr = tr.slice(0, p).reduce((a, b) => a + b, 0) / p;
   for (let i = p; i < tr.length; i++) atr = (atr * (p - 1) + tr[i]) / p;
   return atr;
@@ -254,18 +246,16 @@ function Keltner(closes, highs, lows, emaPeriod = 20, atrMult = 1.5) {
 function Supertrend(highs, lows, closes, period = 10, mult = 3) {
   if (closes.length < period + 2) return null;
   const atr = ATR(highs, lows, closes, period);
-  if (!atr) return null;
+  if (atr == null) return null;
   const hl2 = closes.map((c, i) => (highs[i] + lows[i]) / 2);
   const basicUpper = hl2.map(x => x + mult * atr);
   const basicLower = hl2.map(x => x - mult * atr);
-
   const finalUpper = [...basicUpper];
   const finalLower = [...basicLower];
   for (let i = 1; i < finalUpper.length; i++) {
     finalUpper[i] = (closes[i - 1] <= finalUpper[i - 1]) ? Math.min(basicUpper[i], finalUpper[i - 1]) : basicUpper[i];
     finalLower[i] = (closes[i - 1] >= finalLower[i - 1]) ? Math.max(basicLower[i], finalLower[i - 1]) : basicLower[i];
   }
-
   let trend = 1;
   const st = new Array(closes.length).fill(null);
   st[0] = finalLower[0];
@@ -302,7 +292,7 @@ async function fetchOHLC(pair, interval) {
   return res.json();
 }
 
-// ---- Scoring helpers (normalisation -> [-100, 100]) ----
+// --- Scoring helpers [-100, 100] ---
 function scoreRSI(rsi) {
   if (rsi == null) return null;
   const d = rsi - 50; // -50..+50
@@ -317,7 +307,7 @@ function scoreMACD(hist, prevHist) {
 function scoreBollingerPos(close, bb) {
   if (!bb || bb.upper === bb.lower) return null;
   const pos = (close - bb.lower) / (bb.upper - bb.lower); // 0..1
-  const s = (0.5 - pos) * 200; // 0.5=0, 0=+100, 1=-100
+  const s = (0.5 - pos) * 200; // 0=+100 ; 1=-100
   return clamp(s, -100, 100);
 }
 function scoreADX(adx, plusDI, minusDI) {
@@ -328,7 +318,7 @@ function scoreADX(adx, plusDI, minusDI) {
 }
 function scoreATRpct(atrPct) {
   if (atrPct == null) return null;
-  const center = 1.0;
+  const center = 1.0; // 1% pivot
   const diff = atrPct - center;
   return clamp(-diff * 50, -100, 100);
 }
@@ -336,7 +326,7 @@ function scoreDonchianBreak(close, don) {
   if (!don) return null;
   if (close > don.high) return +100;
   if (close < don.low)  return -100;
-  const pos = (close - don.low) / (don.high - don.low); // 0..1
+  const pos = (close - don.low) / (don.high - don.low);
   return clamp((pos - 0.5) * 80, -40, 40);
 }
 function scoreKeltner(close, kel, bb) {
@@ -345,14 +335,14 @@ function scoreKeltner(close, kel, bb) {
   if (bb) {
     const bbw = bb.upper - bb.lower;
     const kw = kel.upper - kel.lower;
-    if (kw > 0) squeeze = clamp(((kw - bbw) / kw) * 100, -100, 100); // <0 = squeeze
+    if (kw > 0) squeeze = clamp(((kw - bbw) / kw) * 100, -100, 100);
   }
   const dir = close >= kel.mid ? 1 : -1;
   const dist = Math.abs((close - kel.mid) / (kel.upper - kel.lower + 1e-9));
   const dirScore = clamp(dir * dist * 100, -100, 100);
   return { dirScore, squeezeScore: squeeze };
 }
-function scoreSupertrend(_close, st) {
+function scoreSupertrend(close, st) {
   if (!st) return null;
   return st.trend > 0 ? +60 : -60;
 }
@@ -395,7 +385,6 @@ async function analyzeOneTF(assetId, label, interval) {
   const macd = MACD(closes, 12, 26, 9);
   const bb = Bollinger(closes, 20, 2);
   const adx = ADX(highs, lows, closes, 14);
-  const stoch = Stoch(highs, lows, closes, 14, 3, 3);
   const cci = CCI(highs, lows, closes, 20);
   const atr = ATR(highs, lows, closes, 14);
   const atrPct = atr != null ? (atr / close) * 100 : null;
@@ -420,7 +409,6 @@ async function analyzeOneTF(assetId, label, interval) {
   const sDon55 = scoreDonchianBreak(close, don55);
   const kScores = kel ? scoreKeltner(close, kel, bb) : null;
   const sKelDir = kScores ? kScores.dirScore : null;
-  const sKelSqz = kScores ? kScores.squeezeScore : null;
   const sST = scoreSupertrend(close, st);
   const sEmaTrend = scoreEmaTrend(ema20, ema50, ema200);
   const sDist200 = scoreDistEMA200(close, ema200);
@@ -429,27 +417,15 @@ async function analyzeOneTF(assetId, label, interval) {
   const sROC24 = scoreROC(roc24);
   const sROC7d = scoreROC(roc7d);
 
-  const perTFScore =
-    (sEmaTrend ?? 0) * 0.25 +
-    (sMACD ?? 0)     * 0.20 +
-    (sADX ?? 0)      * 0.15 +
-    (sBB ?? 0)       * 0.10 +
-    (sDon20 ?? 0)    * 0.10 +
-    (sDon55 ?? 0)    * 0.10 +
-    (sST ?? 0)       * 0.10 +
-    (sDist200 ?? 0)  * 0.05;
-
   const tfScores = {
     rsi14: sRSI,
     macd_hist: sMACD,
     bb_pos: sBB,
     adx: sADX,
-    atr_pct: atrPct,
     atr_score: sATR,
     donchian20: sDon20,
     donchian55: sDon55,
     keltner_dir: sKelDir,
-    keltner_squeeze: sKelSqz,
     supertrend: sST,
     ema_trend: sEmaTrend,
     dist_ema200: sDist200,
@@ -457,7 +433,17 @@ async function analyzeOneTF(assetId, label, interval) {
     rangepos55: sRP55,
     roc_24h: sROC24,
     roc_7d: sROC7d,
-    tf_aggregate: clamp(perTFScore, -100, 100)
+    // agrégat par TF (directionnel)
+    tf_aggregate: clamp(
+      (sEmaTrend ?? 0) * 0.25 +
+      (sMACD ?? 0)     * 0.20 +
+      (sADX ?? 0)      * 0.15 +
+      (sBB ?? 0)       * 0.10 +
+      (sDon20 ?? 0)    * 0.10 +
+      (sDon55 ?? 0)    * 0.10 +
+      (sST ?? 0)       * 0.10 +
+      (sDist200 ?? 0)  * 0.05, -100, 100
+    )
   };
 
   const features = {
@@ -499,10 +485,6 @@ async function analyzeAsset(assetId) {
   const spot = live?.price ?? null;
   const pairName = live?.pair ?? null;
 
-  let globalVerdict = "NEUTRAL / WAIT";
-  if (weightedScore >= 25) globalVerdict = "LEAN LONG";
-  else if (weightedScore <= -25) globalVerdict = "LEAN SHORT";
-
   const now = new Date();
   const record = {
     t: now.toISOString(),
@@ -511,17 +493,15 @@ async function analyzeAsset(assetId) {
     pair: pairName,
     spotAtAnalysis: spot,
     weightedScore,
-    verdict: globalVerdict,
-    perTF
+    perTF // contient scores & features par TF (15m / 1h / 1d)
   };
 
+  // persist minimal
   appendJsonLine(ANALYSES_FILE, {
-    t: record.t,
-    assetId, pair: pairName,
-    spotAtAnalysis: spot,
-    weightedScore, verdict: globalVerdict
+    t: record.t, assetId, pair: pairName, spotAtAnalysis: spot, weightedScore
   });
 
+  // outcome après 1h (pour métriques internes)
   setTimeout(() => {
     const live2 = livePrices[assetId];
     const spotLater = live2?.price ?? null;
@@ -535,20 +515,17 @@ async function analyzeAsset(assetId) {
     }
     appendJsonLine(OUTCOMES_FILE, {
       tCheck: new Date().toISOString(),
-      assetId,
-      pair: pairName,
-      spotAtT: spot,
-      spotAtTplus1h: spotLater,
+      assetId, pair: pairName,
+      spotAtT: spot, spotAtTplus1h: spotLater,
       delta: (spot != null && spotLater != null) ? +(spotLater - spot).toFixed(6) : null,
-      predictedSign: predSign,
-      wasCorrect: correct
+      predictedSign: predSign, wasCorrect: correct
     });
   }, 60 * 60 * 1000);
 
+  // cache
   analysisCache[assetId] = record;
 
-  console.log(`[ANALYZE] id=${assetId} (${pairName ?? "?"}) wScore=${record.weightedScore} verdict=${globalVerdict} spot=${spot ?? "NA"}`);
-
+  console.log(`[ANALYZE] id=${assetId} (${pairName ?? "?"}) wScore=${record.weightedScore} spot=${spot ?? "NA"}`);
   return record;
 }
 
@@ -558,7 +535,50 @@ function appendJsonLine(file, obj) {
   });
 }
 
-// ==== SCHEDULER HEUREL ====
+// ====== Compact output builder ======
+const INDICATORS_KEYS = [
+  "rsi14","macd_hist","bb_pos","adx","atr_score",
+  "donchian20","donchian55","keltner_dir","supertrend",
+  "ema_trend","dist_ema200","rangepos20","rangepos55",
+  "roc_24h","roc_7d"
+];
+
+// renvoie { short, mid, long, bull, bear } borné [-100,100], + méta
+function buildCompact(record) {
+  const perTF = record.perTF || [];
+  const tf = Object.fromEntries(perTF.map(t => [t.label, t.scores?.tf_aggregate ?? null]));
+
+  const s15 = tf["15m"];
+  const s1h = tf["1h"];
+  const s1d = tf["1d"];
+
+  const short = clamp(((s15 ?? 0)*0.6 + (s1h ?? 0)*0.4), -100, 100);
+  const mid   = clamp(((s1h ?? 0)*0.3 + (s1d ?? 0)*0.7), -100, 100);
+  const long  = clamp((s1d ?? 0), -100, 100);
+
+  // compter signaux bullish/bearish (on ignore |x|<=10)
+  const TH_POS = 10, TH_NEG = -10;
+  let bull = 0, bear = 0;
+  for (const tfRec of perTF) {
+    const s = tfRec.scores || {};
+    for (const k of INDICATORS_KEYS) {
+      const v = s[k];
+      if (v == null) continue;
+      if (v > TH_POS) bull++;
+      else if (v < TH_NEG) bear++;
+    }
+  }
+
+  return {
+    t: record.t,
+    pair: record.pair ?? null,
+    spot: record.spotAtAnalysis ?? null,
+    short, mid, long,
+    bull, bear
+  };
+}
+
+// ====== SCHEDULER HEUREL ======
 async function runAllAssets() {
   for (const id of ASSET_IDS) {
     try {
@@ -589,35 +609,37 @@ async function waitForLive(ids, timeoutMs = 30000) {
   });
 }
 
-// ==== HTTP API ====
+// ===== HTTP API =====
 const app = express();
-app.use(express.json());
 
-// ---- CORS GLOBAL (pour tests file://, localhost, autres domaines)
+// CORS permissif
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*"); // ou mets ton domaine spécifique
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+app.use(express.json());
 
-// Healthcheck simple
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// GET dernier snapshot en mémoire (un id ou tous)
+// GET compact snapshot (un id ou plusieurs)
+// /api/scores?ids=0,1  |  /api/scores?ids=all
 app.get("/api/scores", (req, res) => {
   const idsParam = (req.query.ids || "").trim();
-  if (!idsParam || idsParam.toLowerCase() === "all") {
-    return res.json({ ok: true, assets: analysisCache });
-  }
-  const ids = idsParam.split(",").map(x => +x).filter(Number.isFinite);
+  const list = (!idsParam || idsParam.toLowerCase() === "all")
+    ? ASSET_IDS.slice()
+    : idsParam.split(",").map(x => +x).filter(Number.isFinite);
+
   const out = {};
-  ids.forEach(id => { if (analysisCache[id]) out[id] = analysisCache[id]; });
+  for (const id of list) {
+    const rec = analysisCache[id];
+    if (rec) out[id] = buildCompact(rec);
+  }
   return res.json({ ok: true, assets: out });
 });
 
-// Recalcule pour une liste d'IDs (ex: /api/refresh?ids=0,1,5000 ou ids=all)
+// Force recalcul puis retourne compact
+// /api/refresh?ids=0,1  |  /api/refresh?ids=all
 app.get("/api/refresh", async (req, res) => {
   const idsParam = (req.query.ids || "").trim();
   const list = (!idsParam || idsParam.toLowerCase() === "all")
@@ -630,7 +652,7 @@ app.get("/api/refresh", async (req, res) => {
   for (const id of list) {
     try {
       const r = await analyzeAsset(id);
-      results[id] = r;
+      results[id] = buildCompact(r);
     } catch (e) {
       results[id] = { error: e.message };
     }
