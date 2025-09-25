@@ -25,7 +25,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const WSS_URL = "wss://wss.brokex.trade:8443";
 // stocke { [assetId:number]: { price:number, ts:number, pair?:string } }
 const livePrices = Object.create(null);
-// cache d'analyses en mémoire: { [assetId]: { t, pair, spot, perTF, scores, features } }
+// cache d'analyses en mémoire: { [assetId]: record }
 const analysisCache = Object.create(null);
 
 let reconnectAttempts = 0;
@@ -33,10 +33,12 @@ let loggedSampleOnce = false;
 
 function startWss() {
   const ws = new WebSocket(WSS_URL);
+
   ws.on("open", () => {
     reconnectAttempts = 0;
     console.log("[WSS] connected");
   });
+
   ws.on("message", (raw) => {
     try {
       const data = JSON.parse(raw.toString());
@@ -48,12 +50,15 @@ function startWss() {
       Object.entries(data).forEach(([pairKey, payload]) => {
         const item = payload?.instruments?.[0] ?? payload?.data?.instruments?.[0];
         if (!item) return;
+
         const id = Object.prototype.hasOwnProperty.call(payload, "id")
           ? Number(payload.id)
           : (Number(item?.id) || undefined);
+
         const price = parseFloat(item.currentPrice);
         const ts = Number(item.timestamp ?? Date.now());
         const pairName = item.tradingPair?.toUpperCase?.() ?? String(pairKey);
+
         if (Number.isFinite(id) && Number.isFinite(price)) {
           livePrices[id] = { price, ts, pair: pairName };
         }
@@ -62,6 +67,7 @@ function startWss() {
       console.error("[WSS] parse error:", e.message);
     }
   });
+
   ws.on("close", (code) => {
     console.warn("[WSS] closed:", code);
     const delay = Math.min(30000, 1000 * 2 ** Math.min(reconnectAttempts, 5));
@@ -69,6 +75,7 @@ function startWss() {
     console.warn(`[WSS] retrying in ${delay}ms`);
     setTimeout(startWss, delay);
   });
+
   ws.on("error", (err) => {
     console.error("[WSS] error:", err.message);
     try { ws.close(); } catch (_) {}
@@ -79,7 +86,7 @@ startWss();
 // ====== HELPERS (math & utils) ======
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 const toNum = (x) => (typeof x === "number" ? x : parseFloat(x));
-const last = (arr) => arr?.length ? arr[arr.length - 1] : null;
+const last = (arr) => (arr?.length ? arr[arr.length - 1] : null);
 
 function SMA(arr, p) {
   if (arr.length < p) return null;
@@ -103,7 +110,6 @@ function stddev(arr, p) {
 }
 
 // ====== INDICATEURS ======
-// RSI(14)
 function RSI(closes, p = 14) {
   if (closes.length < p + 1) return null;
   let gains = 0, losses = 0;
@@ -124,10 +130,8 @@ function RSI(closes, p = 14) {
   return 100 - 100 / (1 + rs);
 }
 
-// MACD (12,26,9)
 function MACD(closes, fast = 12, slow = 26, signal = 9) {
   if (closes.length < slow + signal) return null;
-  // EMA incrémentales
   const kF = 2 / (fast + 1), kS = 2 / (slow + 1);
   let emaF = SMA(closes.slice(0, fast), fast);
   let emaS = SMA(closes.slice(0, slow), slow);
@@ -147,7 +151,6 @@ function MACD(closes, fast = 12, slow = 26, signal = 9) {
   return { macd: macdVal, signal: signalVal, hist, prevHist };
 }
 
-// Bollinger(20,2)
 function Bollinger(closes, p = 20, mult = 2) {
   if (closes.length < p) return null;
   const mid = SMA(closes, p);
@@ -155,7 +158,6 @@ function Bollinger(closes, p = 20, mult = 2) {
   return { mid, upper: mid + mult * sd, lower: mid - mult * sd };
 }
 
-// Stoch(14,3,3)
 function Stoch(highs, lows, closes, kP = 14, dP = 3, smoothK = 3) {
   if (closes.length < kP + dP) return null;
   const kArr = [];
@@ -179,7 +181,6 @@ function Stoch(highs, lows, closes, kP = 14, dP = 3, smoothK = 3) {
   return { K, D, prevK, prevD };
 }
 
-// CCI(20)
 function CCI(highs, lows, closes, p = 20) {
   if (closes.length < p) return null;
   const tp = closes.map((c, i) => (highs[i] + lows[i] + closes[i]) / 3);
@@ -190,7 +191,6 @@ function CCI(highs, lows, closes, p = 20) {
   return (lastTP - sma) / (0.015 * meanDev);
 }
 
-// ADX(14)
 function ADX(highs, lows, closes, p = 14) {
   if (closes.length < p + 1) return null;
   const tr = [], plusDM = [], minusDM = [];
@@ -222,7 +222,6 @@ function ADX(highs, lows, closes, p = 14) {
   return { adx, plusDI: last(plusDI), minusDI: last(minusDI) };
 }
 
-// ATR(14) et ATR%
 function ATR(highs, lows, closes, p = 14) {
   if (closes.length < p + 1) return null;
   const tr = [];
@@ -238,7 +237,6 @@ function ATR(highs, lows, closes, p = 14) {
   return atr;
 }
 
-// Donchian channel high/low
 function Donchian(highs, lows, p = 20) {
   if (highs.length < p || lows.length < p) return null;
   const sliceH = highs.slice(-p);
@@ -246,7 +244,6 @@ function Donchian(highs, lows, p = 20) {
   return { high: Math.max(...sliceH), low: Math.min(...sliceL) };
 }
 
-// Keltner (EMA20, ATR*1.5)
 function Keltner(closes, highs, lows, emaPeriod = 20, atrMult = 1.5) {
   const mid = EMA(closes, emaPeriod);
   const atr = ATR(highs, lows, closes, 14);
@@ -254,17 +251,14 @@ function Keltner(closes, highs, lows, emaPeriod = 20, atrMult = 1.5) {
   return { mid, upper: mid + atrMult * atr, lower: mid - atrMult * atr, atr };
 }
 
-// Supertrend (period=10, multiplier=3)
 function Supertrend(highs, lows, closes, period = 10, mult = 3) {
-  // Implémentation simplifiée, renvoie juste la direction actuelle (+1/-1) et la ligne
   if (closes.length < period + 2) return null;
   const atr = ATR(highs, lows, closes, period);
-  if (atr == null) return null;
+  if (!atr) return null;
   const hl2 = closes.map((c, i) => (highs[i] + lows[i]) / 2);
   const basicUpper = hl2.map(x => x + mult * atr);
   const basicLower = hl2.map(x => x - mult * atr);
 
-  // trailing bands (simplification)
   const finalUpper = [...basicUpper];
   const finalLower = [...basicLower];
   for (let i = 1; i < finalUpper.length; i++) {
@@ -272,9 +266,9 @@ function Supertrend(highs, lows, closes, period = 10, mult = 3) {
     finalLower[i] = (closes[i - 1] >= finalLower[i - 1]) ? Math.max(basicLower[i], finalLower[i - 1]) : basicLower[i];
   }
 
-  let trend = 1; // 1=up, -1=down
+  let trend = 1;
   const st = new Array(closes.length).fill(null);
-  st[0] = finalLower[0]; // init
+  st[0] = finalLower[0];
   for (let i = 1; i < closes.length; i++) {
     if (closes[i] > finalUpper[i - 1]) trend = 1;
     else if (closes[i] < finalLower[i - 1]) trend = -1;
@@ -283,8 +277,6 @@ function Supertrend(highs, lows, closes, period = 10, mult = 3) {
   return { trend, value: last(st) };
 }
 
-// ROC (rate of change) sur N points (ex: 24h, 7d)
-// ici on prend N = interval multiples (si données multipériodes indispo, calcule sur la série présente)
 function ROC(closes, lookback) {
   if (closes.length < lookback + 1) return null;
   const lastClose = last(closes);
@@ -310,17 +302,14 @@ async function fetchOHLC(pair, interval) {
   return res.json();
 }
 
-// --- Scoring helpers (normalisation -> [-100, 100]) ---
-// Tous les scores sont renvoyés sur la même échelle.
+// ---- Scoring helpers (normalisation -> [-100, 100]) ----
 function scoreRSI(rsi) {
   if (rsi == null) return null;
-  // centrer 50, saturer éloignements
   const d = rsi - 50; // -50..+50
-  return clamp(d * 2, -100, +100); // ~RSI 0=>-100, 100=>+100
+  return clamp(d * 2, -100, +100);
 }
 function scoreMACD(hist, prevHist) {
   if (hist == null) return null;
-  // signe de l'histogramme, petit bonus si amélioration vs prev
   const base = clamp(Math.tanh(hist) * 80, -80, 80);
   const mom = (prevHist == null) ? 0 : clamp((hist - prevHist) * 40, -20, 20);
   return clamp(base + mom, -100, 100);
@@ -328,50 +317,43 @@ function scoreMACD(hist, prevHist) {
 function scoreBollingerPos(close, bb) {
   if (!bb || bb.upper === bb.lower) return null;
   const pos = (close - bb.lower) / (bb.upper - bb.lower); // 0..1
-  // proche lower => opportunité (bullish), proche upper => risque (bearish)
   const s = (0.5 - pos) * 200; // 0.5=0, 0=+100, 1=-100
   return clamp(s, -100, 100);
 }
 function scoreADX(adx, plusDI, minusDI) {
   if (adx == null || plusDI == null || minusDI == null) return null;
-  // force de tendance * direction
-  const dir = Math.sign(plusDI - minusDI); // +1 up, -1 down
-  const strength = clamp((adx - 20) * 3, 0, 100); // au-dessus de ~20, on scale
+  const dir = Math.sign(plusDI - minusDI);
+  const strength = clamp((adx - 20) * 3, 0, 100);
   return clamp(dir * strength, -100, 100);
 }
 function scoreATRpct(atrPct) {
   if (atrPct == null) return null;
-  // plus de vol = plus de risque (pénalise légèrement). centrer à ~1% → 0
-  const center = 1.0; // 1% comme pivot
+  const center = 1.0;
   const diff = atrPct - center;
-  return clamp(-diff * 50, -100, 100); // >1% -> négatif, <1% -> positif
+  return clamp(-diff * 50, -100, 100);
 }
 function scoreDonchianBreak(close, don) {
   if (!don) return null;
   if (close > don.high) return +100;
   if (close < don.low)  return -100;
-  // à l'intérieur du range → proche high => léger +, proche low => léger -
   const pos = (close - don.low) / (don.high - don.low); // 0..1
   return clamp((pos - 0.5) * 80, -40, 40);
 }
 function scoreKeltner(close, kel, bb) {
   if (!kel) return null;
-  // squeeze si bandes BB < Keltner → momentum à venir, neutre en score directionnel
   let squeeze = null;
   if (bb) {
     const bbw = bb.upper - bb.lower;
     const kw = kel.upper - kel.lower;
     if (kw > 0) squeeze = clamp(((kw - bbw) / kw) * 100, -100, 100); // <0 = squeeze
   }
-  // direction: position vs mid
   const dir = close >= kel.mid ? 1 : -1;
-  const dist = Math.abs((close - kel.mid) / (kel.upper - kel.lower + 1e-9)); // 0..~1
+  const dist = Math.abs((close - kel.mid) / (kel.upper - kel.lower + 1e-9));
   const dirScore = clamp(dir * dist * 100, -100, 100);
   return { dirScore, squeezeScore: squeeze };
 }
-function scoreSupertrend(close, st) {
+function scoreSupertrend(_close, st) {
   if (!st) return null;
-  // +1 up / -1 down → map direct
   return st.trend > 0 ? +60 : -60;
 }
 function scoreEmaTrend(ema20, ema50, ema200) {
@@ -379,7 +361,6 @@ function scoreEmaTrend(ema20, ema50, ema200) {
   let s = 0;
   if (ema20 > ema50) s += 30; else s -= 30;
   if (ema50 > ema200) s += 40; else s -= 40;
-  // distance au 200EMA (plus au-dessus = plus bullish)
   const distPct = ((ema50 - ema200) / ema200) * 100;
   s += clamp(distPct * 2, -30, 30);
   return clamp(s, -100, 100);
@@ -391,12 +372,11 @@ function scoreDistEMA200(close, ema200) {
 }
 function scoreRangePos(close, hi, lo) {
   if (hi == null || lo == null || hi === lo) return null;
-  const pos = (close - lo) / (hi - lo); // 0..1
+  const pos = (close - lo) / (hi - lo);
   return clamp((pos - 0.5) * 200, -100, 100);
 }
 function scoreROC(pct) {
   if (pct == null) return null;
-  // clamp +/-10% day-like
   return clamp(pct * 5, -100, 100);
 }
 
@@ -425,15 +405,12 @@ async function analyzeOneTF(assetId, label, interval) {
   const kel = Keltner(closes, highs, lows, 20, 1.5);
   const st = Supertrend(highs, lows, closes, 10, 3);
 
-  // Range (20/55) position
   const rp20 = don20 ? scoreRangePos(close, don20.high, don20.low) : null;
   const rp55 = don55 ? scoreRangePos(close, don55.high, don55.low) : null;
 
-  // ROC approximatifs (si assez de points sur ce TF)
-  const roc24 = ROC(closes, Math.round(86400 / interval)); // variation ~24h sur ce TF
+  const roc24 = ROC(closes, Math.round(86400 / interval));
   const roc7d = ROC(closes, Math.round(7 * 86400 / interval));
 
-  // --- Scores normalisés [-100, 100] ---
   const sRSI = scoreRSI(rsi);
   const sMACD = macd ? scoreMACD(macd.hist, macd.prevHist) : null;
   const sBB = bb ? scoreBollingerPos(close, bb) : null;
@@ -443,7 +420,7 @@ async function analyzeOneTF(assetId, label, interval) {
   const sDon55 = scoreDonchianBreak(close, don55);
   const kScores = kel ? scoreKeltner(close, kel, bb) : null;
   const sKelDir = kScores ? kScores.dirScore : null;
-  const sKelSqz = kScores ? kScores.squeezeScore : null; // info (squeeze), pas directionnel
+  const sKelSqz = kScores ? kScores.squeezeScore : null;
   const sST = scoreSupertrend(close, st);
   const sEmaTrend = scoreEmaTrend(ema20, ema50, ema200);
   const sDist200 = scoreDistEMA200(close, ema200);
@@ -452,7 +429,6 @@ async function analyzeOneTF(assetId, label, interval) {
   const sROC24 = scoreROC(roc24);
   const sROC7d = scoreROC(roc7d);
 
-  // Score agrégé timeframe (pondère quelques signaux directionnels)
   const perTFScore =
     (sEmaTrend ?? 0) * 0.25 +
     (sMACD ?? 0)     * 0.20 +
@@ -536,10 +512,9 @@ async function analyzeAsset(assetId) {
     spotAtAnalysis: spot,
     weightedScore,
     verdict: globalVerdict,
-    perTF // contient scores & features par TF (15m / 1h / 1d)
+    perTF
   };
 
-  // Persist en fichiers JSONL (facultatif, utile debug)
   appendJsonLine(ANALYSES_FILE, {
     t: record.t,
     assetId, pair: pairName,
@@ -547,7 +522,6 @@ async function analyzeAsset(assetId) {
     weightedScore, verdict: globalVerdict
   });
 
-  // outcome 1h plus tard (comme avant)
   setTimeout(() => {
     const live2 = livePrices[assetId];
     const spotLater = live2?.price ?? null;
@@ -571,7 +545,6 @@ async function analyzeAsset(assetId) {
     });
   }, 60 * 60 * 1000);
 
-  // Stocke en mémoire
   analysisCache[assetId] = record;
 
   console.log(`[ANALYZE] id=${assetId} (${pairName ?? "?"}) wScore=${record.weightedScore} verdict=${globalVerdict} spot=${spot ?? "NA"}`);
@@ -619,6 +592,18 @@ async function waitForLive(ids, timeoutMs = 30000) {
 // ==== HTTP API ====
 const app = express();
 app.use(express.json());
+
+// ---- CORS GLOBAL (pour tests file://, localhost, autres domaines)
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*"); // ou mets ton domaine spécifique
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// Healthcheck simple
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // GET dernier snapshot en mémoire (un id ou tous)
 app.get("/api/scores", (req, res) => {
@@ -670,3 +655,4 @@ app.listen(PORT, () => console.log(`HTTP up on :${PORT}`));
     setInterval(runAllAssets, 60 * 60 * 1000);
   }, Math.min(msToNextHour(), 15_000));
 })();
+
