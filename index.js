@@ -8,7 +8,7 @@ const WebSocket = require("ws");
 const express = require("express");
 
 // ==== CONFIG ====
-const ASSET_IDS = [0, 1, 5500, 5000, 5002];
+const ASSET_IDS = [6004, 6005, 6010, 6003, 6011, 6009, 6059, 6068, 6001, 6066, 6006, 6002, 6000, 5010, 5000, 5002, 5013, 5011, 5012, 5001, 5501, 5500, 0, 1, 10, 14, 5, 3, 15, 16, 90, 2];
 const TIMEFRAMES = [
   { label: "15m", interval: 900,   weight: 1 },
   { label: "1h",  interval: 3600,  weight: 2 },
